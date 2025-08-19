@@ -10,7 +10,7 @@ from pegasus.simulator.logic.state import State
 from pegasus.simulator.logic.graphical_sensors import GraphicalSensor
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 
-from omni.isaac.sensor import Camera
+from isaacsim.sensors.camera import Camera
 from omni.usd import get_stage_next_free_path
 
 # Auxiliary scipy and numpy modules
@@ -47,7 +47,7 @@ class MonocularCamera(GraphicalSensor):
         """
 
         # Initialize the Super class "object" attributes
-        super().__init__(sensor_type="MonocularCamera", update_rate=config.get("frequency", 60.0))        
+        super().__init__(sensor_type="MonocularCamera", update_rate=config.get("frequency", 10.0))  # Reduced from 60 to 10 Hz        
         
         # Setup the name of the camera primitive path
         self._camera_name = camera_name
@@ -58,7 +58,7 @@ class MonocularCamera(GraphicalSensor):
         self._position = config.get("position", np.array([0.30, 0.0, 0.0]))
         self._orientation = config.get("orientation", np.array([0.0, 0.0, 180.0]))
         self._resolution = config.get("resolution", (1920, 1200))
-        self._frequency = config.get("frequency", 30)
+        self._frequency = config.get("frequency", 10)  # Reduced default frequency to prevent lag
         self._intrinsics = config.get("intrinsics", np.array([[958.8, 0.0, 957.8], [0.0, 956.7, 589.5], [0.0, 0.0, 1.0]]))
         self._distortion_coefficients = config.get("distortion_coefficients", np.array([0.14, -0.03, -0.0002, -0.00003, 0.009, 0.5, -0.07, 0.017]))
         self._diagonal_fov = config.get("diagonal_fov", 140.0)
@@ -89,6 +89,22 @@ class MonocularCamera(GraphicalSensor):
         
         # Set the camera position locally with respect to the drone
         self._camera.set_local_pose(np.array(self._position), Rotation.from_euler("ZYX", self._orientation, degrees=True).as_quat())
+        
+        # Fix aperture settings to match resolution aspect ratio to prevent warnings
+        aspect_ratio = self._resolution[0] / self._resolution[1]  # width/height
+        
+        # Set consistent aperture values to avoid the warning
+        # Using standard values that maintain the aspect ratio
+        horizontal_aperture = 20.955  # Standard value
+        vertical_aperture = horizontal_aperture / aspect_ratio
+        
+        # Apply aperture settings after camera creation
+        try:
+            self._camera.set_horizontal_aperture(horizontal_aperture)
+            self._camera.set_vertical_aperture(vertical_aperture)
+        except AttributeError:
+            # Skip aperture setting if the API is not available
+            pass
         
     def start(self):
 
@@ -134,13 +150,20 @@ class MonocularCamera(GraphicalSensor):
             (dict) A dictionary containing the current state of the sensor (the data produced by the sensor)
         """
 
-        while self.counter < 100:
+        # Skip updates during the first 100 iterations to let the simulation stabilize
+        if self.counter < 100:
             self.counter += 1
-            return
+            return None
 
         # If all the camera properties are not set yet, return None
         if not self._camera_full_set:
             return None
+
+        # Throttle camera data acquisition to reduce performance impact
+        # Only update camera data every 5th call (reduces frequency by 80%)
+        if self.counter % 5 != 0:
+            self.counter += 1
+            return self._state if hasattr(self, '_state') else None
 
         # Get the data from the camera
         # TODO: Fix this feature later
@@ -158,11 +181,21 @@ class MonocularCamera(GraphicalSensor):
             #if self._depth:
             #    self._state["depth"] = self._camera.get_depth()
 
-            if self._camera.get_projection_type() == "pinhole":
+            # Use the new API instead of deprecated get_projection_type()
+            try:
+                lens_model = self._camera.get_lens_distortion_model()
+                if lens_model == "pinhole" or lens_model is None:
+                    self._state["intrinsics"] = self._camera.get_intrinsics_matrix()
+            except AttributeError:
+                # Fallback for older versions - but this should be avoided
                 self._state["intrinsics"] = self._camera.get_intrinsics_matrix()
             
         # If something goes wrong during the data acquisition, just return None
-        except:
+        except Exception as e:
+            # Log the error but don't spam the console
+            if self.counter % 50 == 0:  # Only log every 50th error
+                print(f"Camera update error: {e}")
             self._state = None
 
+        self.counter += 1
         return self._state

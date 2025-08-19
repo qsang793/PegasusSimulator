@@ -7,6 +7,7 @@
 
 import numpy as np
 
+# The dynamic control interface (deprecated but still working in Isaac Sim 5.0)
 from omni.isaac.dynamic_control import _dynamic_control
 
 # The vehicle interface
