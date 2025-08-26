@@ -418,21 +418,121 @@ class ROS2Backend(Backend):
 
         # Create a writer for publishing the camera info
         writer_info = rep.writers.get("ROS2PublishCameraInfo")
-        camera_info = read_camera_info(render_product_path=render_prod_path)
-        writer_info.initialize(
-            nodeNamespace=self._namespace + str(self._id), 
-            topicName=data["camera_name"] + "/color/camera_info", 
-            frameId=data["camera_name"], 
-            queueSize=1,
-            width=camera_info["width"],
-            height=camera_info["height"],
-            projectionType=camera_info["projectionType"],
-            k=camera_info["k"].reshape([1, 9]),
-            r=camera_info["r"].reshape([1, 9]),
-            p=camera_info["p"].reshape([1, 12]),
-            physicalDistortionModel=camera_info["physicalDistortionModel"],
-            physicalDistortionCoefficients=camera_info["physicalDistortionCoefficients"]
-        )
+        
+        try:
+            camera_info_raw = read_camera_info(render_product_path=render_prod_path)
+            carb.log_info(f"[ROS2Backend] camera_info_raw type: {type(camera_info_raw)}")
+            
+            # Isaac Sim 5.0 compatibility: Handle different return formats
+            camera_info = None
+            
+            if isinstance(camera_info_raw, dict):
+                # Direct dict return (older format or some configs)
+                camera_info = camera_info_raw
+                carb.log_info("[ROS2Backend] Direct dict format detected")
+                
+            elif isinstance(camera_info_raw, tuple):
+                carb.log_info(f"[ROS2Backend] Tuple format detected, length: {len(camera_info_raw)}")
+                
+                # Try different tuple structures based on Isaac Sim 5.0 behavior
+                # Method 1: Check each tuple element for dict with camera params
+                for i, item in enumerate(camera_info_raw):
+                    if isinstance(item, dict) and any(key in item for key in ["width", "height", "projectionType"]):
+                        camera_info = item
+                        carb.log_info(f"[ROS2Backend] Found camera dict at tuple[{i}]")
+                        break
+                
+                # Method 2: If no dict found, try to reconstruct from Isaac Sim intrinsics
+                if camera_info is None and len(camera_info_raw) >= 2:
+                    try:
+                        # Isaac Sim 5.0 might return (intrinsics_matrix, resolution, ...)
+                        if hasattr(camera_info_raw[0], 'shape') and len(camera_info_raw[0].shape) == 2:
+                            # First element is intrinsics matrix
+                            intrinsics = camera_info_raw[0]
+                            width, height = 640, 480  # Default resolution
+                            
+                            # Try to get resolution from second element
+                            if len(camera_info_raw) > 1:
+                                res_elem = camera_info_raw[1] 
+                                if isinstance(res_elem, (list, tuple)) and len(res_elem) >= 2:
+                                    width, height = int(res_elem[0]), int(res_elem[1])
+                                elif hasattr(res_elem, 'shape') and len(res_elem.shape) >= 1:
+                                    width, height = int(res_elem[0]), int(res_elem[1])
+                            
+                            # Construct camera_info dict from intrinsics matrix
+                            fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+                            cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+                            
+                            camera_info = {
+                                "width": width,
+                                "height": height,
+                                "projectionType": "pinhole",
+                                "k": [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0],
+                                "r": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                                "p": [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0],
+                                "physicalDistortionModel": "pinhole",
+                                "physicalDistortionCoefficients": [0.0, 0.0, 0.0, 0.0, 0.0]
+                            }
+                            carb.log_info(f"[ROS2Backend] Reconstructed camera info from intrinsics: {width}x{height}")
+                        
+                        # Try simple width/height extraction as fallback
+                        elif len(camera_info_raw) >= 2:
+                            width = camera_info_raw[0] if isinstance(camera_info_raw[0], (int, float)) else 640
+                            height = camera_info_raw[1] if isinstance(camera_info_raw[1], (int, float)) else 480
+                            
+                            camera_info = {
+                                "width": int(width),
+                                "height": int(height), 
+                                "projectionType": "pinhole",
+                                "k": [500.0, 0.0, width/2, 0.0, 500.0, height/2, 0.0, 0.0, 1.0],  # Default focal length
+                                "r": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                                "p": [500.0, 0.0, width/2, 0.0, 0.0, 500.0, height/2, 0.0, 0.0, 0.0, 1.0, 0.0],
+                                "physicalDistortionModel": "pinhole", 
+                                "physicalDistortionCoefficients": [0.0, 0.0, 0.0, 0.0, 0.0]
+                            }
+                            carb.log_info(f"[ROS2Backend] Fallback camera info: {width}x{height}")
+                    except Exception as e:
+                        carb.log_error(f"[ROS2Backend] Error reconstructing camera info: {e}")
+            
+            else:
+                carb.log_error(f"[ROS2Backend] Unexpected camera_info_raw type: {type(camera_info_raw)}")
+            
+            # Final fallback: Use sensible defaults if all else fails
+            if camera_info is None:
+                carb.log_warn("[ROS2Backend] Using default camera parameters as fallback")
+                camera_info = {
+                    "width": 640,
+                    "height": 480,
+                    "projectionType": "pinhole",
+                    "k": [500.0, 0.0, 320.0, 0.0, 500.0, 240.0, 0.0, 0.0, 1.0],
+                    "r": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    "p": [500.0, 0.0, 320.0, 0.0, 0.0, 500.0, 240.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    "physicalDistortionModel": "pinhole",
+                    "physicalDistortionCoefficients": [0.0, 0.0, 0.0, 0.0, 0.0]
+                }
+            
+            # Initialize the camera info writer
+            carb.log_info(f"[ROS2Backend] Final camera_info keys: {list(camera_info.keys())}")
+            writer_info.initialize(
+                nodeNamespace=self._namespace + str(self._id), 
+                topicName=data["camera_name"] + "/color/camera_info", 
+                frameId=data["camera_name"], 
+                queueSize=1,
+                width=camera_info["width"],
+                height=camera_info["height"],
+                projectionType=camera_info["projectionType"],
+                k=camera_info["k"] if isinstance(camera_info["k"], list) else camera_info["k"].reshape([1, 9]).tolist()[0],
+                r=camera_info["r"] if isinstance(camera_info["r"], list) else camera_info["r"].reshape([1, 9]).tolist()[0],
+                p=camera_info["p"] if isinstance(camera_info["p"], list) else camera_info["p"].reshape([1, 12]).tolist()[0],
+                physicalDistortionModel=camera_info["physicalDistortionModel"],
+                physicalDistortionCoefficients=camera_info["physicalDistortionCoefficients"]
+            )
+            carb.log_info("[ROS2Backend] Camera info writer initialized successfully")
+            
+        except Exception as e:
+            carb.log_error(f"[ROS2Backend] Failed to initialize camera info writer: {e}")
+            carb.log_error("[ROS2Backend] Skipping camera info writer initialization")
+            return
 
         writer_info.attach([render_prod_path])
 

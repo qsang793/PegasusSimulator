@@ -54,8 +54,8 @@ class PegasusApp:
         self.world = self.pg.world
 
         # Launch one of the worlds provided by NVIDIA
-        # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Curved Gridroom"])
-        self.pg.load_environment("/home/quangsang/Downloads/test.usdz")
+        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Curved Gridroom"])
+        # self.pg.load_environment("/home/quangsang/Downloads/test.usdz")
 
         # Create the vehicle
         # Try to spawn the selected robot in the world to the specified namespace
