@@ -29,6 +29,9 @@ except ImportError:
 
 from pegasus.simulator.logic.backends.backend import Backend
 
+# Import timeline for simulation time synchronization
+import omni.timeline
+
 # Import the replicatore core module used for writing graphical data to ROS 2
 import omni
 import omni.graph.core as og
@@ -106,6 +109,14 @@ class ROS2Backend(Backend):
         
         # Setup zero input reference for the thrusters
         self.input_ref = [0.0 for i in range(self._num_rotors)]
+
+        # Initialize timeline interface for simulation time synchronization
+        self.timeline = omni.timeline.get_timeline_interface()
+        
+        # Flag to use simulation time instead of system time for better synchronization
+        self.use_sim_time = config.get("use_sim_time", True)
+        
+        carb.log_info(f"[ROS2Backend] Time synchronization mode: {'simulation' if self.use_sim_time else 'system'} time")
 
         # -----------------------------------------------------
         # Initialize the static and dynamic tf broadcasters
@@ -204,6 +215,30 @@ class ROS2Backend(Backend):
 
         self.tf_static_broadcaster.sendTransform(t)
 
+    def get_synchronized_timestamp(self):
+        """
+        Get synchronized timestamp that works with both simulation and system time
+        This ensures all sensors (camera, IMU, GPS) use the same time reference
+        """
+        if self.use_sim_time and self.timeline:
+            try:
+                # Get simulation time in seconds
+                sim_time_seconds = self.timeline.get_current_time()
+                
+                # Convert to ROS timestamp format using proper rclpy Time constructor
+                sec = int(sim_time_seconds)
+                nanosec = int((sim_time_seconds - sec) * 1e9)
+                
+                # Create ROS timestamp
+                ros_time = rclpy.time.Time(seconds=sec, nanoseconds=nanosec)
+                return ros_time.to_msg()
+                
+            except Exception as e:
+                carb.log_warn(f"[ROS2Backend] Failed to get simulation time, falling back to system time: {e}")
+                
+        # Fallback to system/ROS time
+        return self.node.get_clock().now().to_msg()
+
     def update_state(self, state):
         """
         Method that when implemented, should handle the receivel of the state of the vehicle using this callback
@@ -218,11 +253,12 @@ class ROS2Backend(Backend):
         twist_inertial = TwistStamped()
         accel = AccelStamped()
 
-        # Update the header
-        pose.header.stamp = self.node.get_clock().now().to_msg()
-        twist.header.stamp = pose.header.stamp
-        twist_inertial.header.stamp = pose.header.stamp
-        accel.header.stamp = pose.header.stamp
+        # Update the header with synchronized timestamp
+        synchronized_stamp = self.get_synchronized_timestamp()
+        pose.header.stamp = synchronized_stamp
+        twist.header.stamp = synchronized_stamp
+        twist_inertial.header.stamp = synchronized_stamp
+        accel.header.stamp = synchronized_stamp
 
         pose.header.frame_id = "map"
         twist.header.frame_id = self._namespace + "_" + "base_link"
@@ -322,8 +358,8 @@ class ROS2Backend(Backend):
 
         msg = Imu()
 
-        # Update the header
-        msg.header.stamp = self.node.get_clock().now().to_msg()
+        # Update the header with synchronized timestamp
+        msg.header.stamp = self.get_synchronized_timestamp()
         msg.header.frame_id = self._namespace + '_' + "base_link_frd"
         
         # Update the angular velocity (NED + FRD)
@@ -344,10 +380,11 @@ class ROS2Backend(Backend):
         msg = NavSatFix()
         msg_vel = TwistStamped()
 
-        # Update the headers
-        msg.header.stamp = self.node.get_clock().now().to_msg()
+        # Update the headers with synchronized timestamp
+        synchronized_stamp = self.get_synchronized_timestamp()
+        msg.header.stamp = synchronized_stamp
         msg.header.frame_id = "map_ned"
-        msg_vel.header.stamp = msg.header.stamp
+        msg_vel.header.stamp = synchronized_stamp
         msg_vel.header.frame_id = msg.header.frame_id
 
         # Update the status of the GPS
@@ -374,8 +411,8 @@ class ROS2Backend(Backend):
         
         msg = MagneticField()
 
-        # Update the headers
-        msg.header.stamp = self.node.get_clock().now().to_msg()
+        # Update the headers with synchronized timestamp
+        msg.header.stamp = self.get_synchronized_timestamp()
         msg.header.frame_id = "base_link_frd"
 
         msg.magnetic_field.x = data["magnetic_field"][0]
@@ -400,6 +437,18 @@ class ROS2Backend(Backend):
         # Create the writer for the rgb camera
         writer = rep.writers.get("LdrColorSDROS2PublishImage")
         writer.initialize(nodeNamespace=self._namespace + str(self._id), topicName=data["camera_name"] + "/color/image_raw", frameId=data["camera_name"], queueSize=1)
+        
+        # Configure timestamp synchronization for camera - try to use simulation time
+        try:
+            if hasattr(writer, 'set_use_sim_time'):
+                writer.set_use_sim_time(self.use_sim_time)
+                carb.log_info(f"[ROS2Backend] Camera writer configured for {'simulation' if self.use_sim_time else 'system'} time")
+            elif hasattr(writer, 'useSimTime'):
+                writer.useSimTime = self.use_sim_time
+                carb.log_info(f"[ROS2Backend] Camera writer useSimTime set to {self.use_sim_time}")
+        except Exception as e:
+            carb.log_warn(f"[ROS2Backend] Could not configure camera timestamp mode: {e}")
+            
         writer.attach([render_prod_path])
 
         # Add the writer to the dictionary
@@ -407,10 +456,19 @@ class ROS2Backend(Backend):
 
         # Check if depth is enabled, if so, set the depth properties
         if "depth" in data:
-
             # Create the writer for the depth camera
             writer_depth = rep.writers.get("DistanceToImagePlaneSDROS2PublishImage")
             writer_depth.initialize(nodeNamespace=self._namespace + str(self._id), topicName=data["camera_name"] + "/depth", frameId=data["camera_name"], queueSize=1)
+            
+            # Configure timestamp synchronization for depth camera
+            try:
+                if hasattr(writer_depth, 'set_use_sim_time'):
+                    writer_depth.set_use_sim_time(self.use_sim_time)
+                elif hasattr(writer_depth, 'useSimTime'):
+                    writer_depth.useSimTime = self.use_sim_time
+            except Exception as e:
+                carb.log_warn(f"[ROS2Backend] Could not configure depth camera timestamp mode: {e}")
+                
             writer_depth.attach([render_prod_path])
 
             # Add the writer to the dictionary
@@ -527,6 +585,16 @@ class ROS2Backend(Backend):
                 physicalDistortionModel=camera_info["physicalDistortionModel"],
                 physicalDistortionCoefficients=camera_info["physicalDistortionCoefficients"]
             )
+            
+            # Configure timestamp synchronization for camera info
+            try:
+                if hasattr(writer_info, 'set_use_sim_time'):
+                    writer_info.set_use_sim_time(self.use_sim_time)
+                elif hasattr(writer_info, 'useSimTime'):
+                    writer_info.useSimTime = self.use_sim_time
+            except Exception as e:
+                carb.log_warn(f"[ROS2Backend] Could not configure camera info timestamp mode: {e}")
+                
             carb.log_info("[ROS2Backend] Camera info writer initialized successfully")
             
         except Exception as e:

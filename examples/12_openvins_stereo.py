@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
-| File: 10_graphs.py
-| License: BSD-3-Clause. Copyright (c) 2024, Marcelo Jacinto and Filip Stec. All rights reserved.
+| File: 8_camera_vehicle.py
+| License: BSD-3-Clause. Copyright (c) 2024, Marcelo Jacinto. All rights reserved.
 | Description: This files serves as an example on how to build an app that makes use of the Pegasus API, 
 | where the data is send/received through mavlink, the vehicle is controled using mavlink and
 | camera data is sent to ROS2 topics at the same time.
@@ -21,15 +21,18 @@ simulation_app = SimulationApp({"headless": False})
 # -----------------------------------
 import omni.timeline
 from isaacsim.core.api.world import World
+
 from isaacsim.core.api.objects import DynamicCuboid
 import numpy as np
 
 # Import the Pegasus API for simulating drones
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
+from pegasus.simulator.logic.graphical_sensors.monocular_camera import MonocularCamera
+from pegasus.simulator.logic.graphical_sensors.lidar import Lidar
 from pegasus.simulator.logic.backends.px4_mavlink_backend import PX4MavlinkBackend, PX4MavlinkBackendConfig
+from pegasus.simulator.logic.backends.ros2_backend import ROS2Backend
 from pegasus.simulator.logic.vehicles.multirotor import Multirotor, MultirotorConfig
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
-from pegasus.simulator.logic.graphs import ROS2CameraGraph
 
 # Auxiliary scipy and numpy modules
 from scipy.spatial.transform import Rotation
@@ -56,19 +59,8 @@ class PegasusApp:
         self.world = self.pg.world
 
         # Launch one of the worlds provided by NVIDIA
-        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Curved Gridroom"])
-
-        
-        cube_2 = self.world.scene.add(
-            DynamicCuboid(
-                prim_path="/new_cube_2",
-                name="cube_1",
-                position=np.array([-3.0, 0, 2.0]),
-                scale=np.array([1.0, 1.0, 1.0]),
-                size=1.0,
-                color=np.array([255, 0, 0]),
-            )
-        )
+        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Full Warehouse"])
+        # self.pg.load_environment("/home/quangsang/Downloads/dungcoxoa1.usdz")
 
         # Create the vehicle
         # Try to spawn the selected robot in the world to the specified namespace
@@ -79,14 +71,35 @@ class PegasusApp:
             "px4_autolaunch": True,
             "px4_dir": self.pg.px4_path
         })
-        config_multirotor.backends = [PX4MavlinkBackend(mavlink_config)]
+        config_multirotor.backends = [
+            PX4MavlinkBackend(mavlink_config), 
+            ROS2Backend(vehicle_id=1, 
+                        config={
+                            "use_sim_time": True,
+                            "namespace": 'drone', 
+                            "pub_sensors": True,
+                            "pub_graphical_sensors": True,
+                            "pub_state": True,
+                            "sub_control": False,
+                            "pub_imu": True,
+                            })]
 
-        # Create camera graph for the existing Camera prim on the Iris model, which can be found 
-        # at the prim path `/World/quadrotor/body/Camera`. The camera prim path is the local path from the vehicle's prim path
-        # to the camera prim, to which this graph will be connected. All ROS2 topics published by this graph will have 
-        # namespace `quadrotor` and frame_id `Camera` followed by the selected camera types (`rgb`, `camera_info`).
-        config_multirotor.graphs = [ROS2CameraGraph("body/Camera", config={"types": ['rgb', 'camera_info']})]
-        
+        # Create stereo camera setup (left and right cameras)
+        config_multirotor.graphical_sensors = [
+            MonocularCamera("camera_left", config={
+                "frequency": 20.0, 
+                "resolution": (640, 480), 
+                "depth": True,
+                "position": [0.30, 0.05, 0.0],  # Left camera - 5cm to the left
+            }),
+            MonocularCamera("camera_right", config={
+                "frequency": 20.0, 
+                "resolution": (640, 480), 
+                "depth": True,
+                "position": [0.30, -0.05, 0.0],  # Right camera - 5cm to the right  
+            })
+        ]
+
         Multirotor(
             "/World/quadrotor",
             ROBOTS['Iris'],
@@ -95,6 +108,8 @@ class PegasusApp:
             Rotation.from_euler("XYZ", [0.0, 0.0, 0.0], degrees=True).as_quat(),
             config=config_multirotor,
         )
+        
+        
 
         # Reset the simulation environment so that all articulations (aka robots) are initialized
         self.world.reset()

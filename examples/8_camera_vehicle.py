@@ -59,8 +59,8 @@ class PegasusApp:
         self.world = self.pg.world
 
         # Launch one of the worlds provided by NVIDIA
-        # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Curved Gridroom"])
-        self.pg.load_environment("/home/quangsang/Downloads/test.usdz")
+        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Curved Gridroom"])
+        # self.pg.load_environment("/home/quangsang/Downloads/test.usdz")
 
         cube_2 = self.world.scene.add(
             DynamicCuboid(
@@ -80,20 +80,23 @@ class PegasusApp:
         mavlink_config = PX4MavlinkBackendConfig({
             "vehicle_id": 0,
             "px4_autolaunch": True,
-            "px4_dir": "/home/marcelo/PX4-Autopilot"
+            "px4_dir": self.pg.px4_path
         })
         config_multirotor.backends = [
             PX4MavlinkBackend(mavlink_config), 
             ROS2Backend(vehicle_id=1, 
                         config={
+                            "use_sim_time": True,
                             "namespace": 'drone', 
-                            "pub_sensors": False,
+                            "pub_sensors": True,
                             "pub_graphical_sensors": True,
                             "pub_state": True,
-                            "sub_control": False,})]
+                            "sub_control": False,
+                            "pub_imu": True,
+                            })]
 
         # Create a camera and lidar sensors
-        config_multirotor.graphical_sensors = [MonocularCamera("camera", config={"update_rate": 60.0})]
+        config_multirotor.graphical_sensors = [MonocularCamera("camera", config={"update_rate": 20.0, "resolution": (640, 480)})]
         
         Multirotor(
             "/World/quadrotor",

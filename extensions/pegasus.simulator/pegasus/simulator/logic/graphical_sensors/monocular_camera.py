@@ -177,9 +177,10 @@ class MonocularCamera(GraphicalSensor):
             self._state["frequency"] = self._frequency
             self._state["camera"] = self._camera
 
-            # Check if we want to get the depth image
-            #if self._depth:
-            #    self._state["depth"] = self._camera.get_depth()
+            # Include depth flag in state so ROS2Backend knows to create depth writer
+            if self._depth:
+                self._state["depth"] = True
+                #self._state["depth_image"] = self._camera.get_depth()
 
             # Use the new API instead of deprecated get_projection_type()
             try:
